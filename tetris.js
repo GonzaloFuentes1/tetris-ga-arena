@@ -247,6 +247,24 @@
     return { score: g.score, lines: g.lines, pieces: g.pieces, over: g.over };
   }
 
+  // Battle: both agents get the same pieces; clearing 2, 3 or 4 lines at once
+  // sends 1, 2 or 4 garbage rows to the other board. The last one standing
+  // wins; if both reach maxPieces, the higher score wins.
+  // a and b are { weights, ev }. Returns 1 if a wins, 0 if b wins, 0.5 on a draw.
+  var SEND = [0, 0, 1, 2, 4];
+  function battle(a, b, seed, levelId, maxPieces) {
+    var ga = new Game(seed, levelId), gb = new Game(seed, levelId);
+    while (true) {
+      var ra = ga.over || ga.pieces >= maxPieces ? null : ga.step(a.weights, a.ev);
+      var rb = gb.over || gb.pieces >= maxPieces ? null : gb.step(b.weights, b.ev);
+      if (ra && SEND[ra.cleared]) gb.receive(SEND[ra.cleared]);
+      if (rb && SEND[rb.cleared]) ga.receive(SEND[rb.cleared]);
+      if (ga.over !== gb.over) return ga.over ? 0 : 1;
+      var done = (ga.over || ga.pieces >= maxPieces) && (gb.over || gb.pieces >= maxPieces);
+      if (done) return ga.score > gb.score ? 1 : ga.score < gb.score ? 0 : 0.5;
+    }
+  }
+
   // Genetic algorithm of NN_GA.py: fitness-proportional parents, uniform
   // crossover and Gaussian mutation. One change: the elite is copied without
   // mutation (the original mutated it too).
@@ -409,7 +427,7 @@
     ACTIVATIONS: Object.keys(ACTS), paramCount: paramCount, compileRule: compileRule,
     defaultSpec: defaultSpec, makeEvaluator: makeEvaluator,
     W: W, H: H, LEVELS: LEVELS, SHAPES: SHAPES, NAMES: NAMES, ROTATIONS: ROTATIONS, FEATURES: FEATURES,
-    rng: rng, features: features, placements: placements, Game: Game, play: play,
+    rng: rng, features: features, placements: placements, Game: Game, play: play, battle: battle, SEND: SEND,
     randomWeights: randomWeights, nextGeneration: nextGeneration
   };
 });
