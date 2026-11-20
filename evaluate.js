@@ -11,7 +11,12 @@ const T = require('./tetris.js');
 const REPO = process.env.LB_REPO || 'GonzaloFuentes1/tetris-ga-leaderboard';
 const TOKEN = process.env.HF_TOKEN;
 const SEEDS = (process.env.EVAL_SEEDS || '').split(',').map(Number).filter(Number.isFinite).slice(0, 8);
-const CAP = 500;
+const CAP = 500;   // pieces per side in a battle
+// Level benchmark: 10 secret games per level, up to 2,000 pieces each,
+// measured in lines cleared per game. The games come from the secret seeds.
+const LEVEL_CAP = 2000;
+const LEVEL_SEEDS = (() => { const r = T.rng((SEEDS[0] || 1) ^ 0x5eed); return Array.from({ length: 10 }, () => Math.floor(r() * 1e9)); })();
+const BENCH = 'lines-10x2000';
 const TAG = '[submission]';
 const KEEP = 50;   // people kept on the leaderboard, by battle Elo
 const K = 24;      // Elo step for games between people
@@ -65,25 +70,15 @@ function validate(body, fallbackName) {
 function evaluate(agent) {
   const levels = {};
   T.LEVELS.forEach(l => {
-    let score = 0, lines = 0;
-    SEEDS.forEach(sd => { const r = T.play(agent.weights, sd, CAP, l.id, agent.ev); score += r.score; lines += r.lines; });
-    levels[l.id] = { score: Math.round(score / SEEDS.length), lines: +(lines / SEEDS.length).toFixed(1) };
+    let score = 0, lines = 0, pieces = 0;
+    LEVEL_SEEDS.forEach(sd => { const r = T.play(agent.weights, sd, LEVEL_CAP, l.id, agent.ev); score += r.score; lines += r.lines; pieces += r.pieces; });
+    const n = LEVEL_SEEDS.length;
+    levels[l.id] = { lines: +(lines / n).toFixed(1), pieces: Math.round(pieces / n), score: Math.round(score / n) };
   });
   return levels;
 }
 
-// Best average score per level among the 100 bots on the same secret seeds,
-// so ratings sit on the same scale as the bot ladder.
 const BOTS = require('./pool.json').agents.map(b => ({ name: b.name, elo: b.battle.elo, weights: b.weights, ev: T.makeEvaluator(b.spec || T.defaultSpec()) }));
-function reference() {
-  const best = {};
-  T.LEVELS.forEach(l => { best[l.id] = 1; });
-  BOTS.forEach(a => T.LEVELS.forEach(l => {
-    let s = 0; SEEDS.forEach(sd => { s += T.play(a.weights, sd, CAP, l.id, a.ev).score; });
-    best[l.id] = Math.max(best[l.id], s / SEEDS.length);
-  }));
-  return best;
-}
 
 // Battle Elo. A new agent first gets a performance rating from battles
 // against the 10 bots (whose Elo is fixed), then plays one battle against
@@ -112,7 +107,8 @@ async function loadBoard() {
 }
 
 function card(board) {
-  const rows = board.entries.map((e, i) => `| ${i + 1} | [@${e.user}](https://huggingface.co/${e.user}) | ${e.name.replace(/\|/g, '/')} | ${e.arch} | ${(e.battle && e.battle.elo) || ''} | ${e.overall} |`).join('\n');
+  const lv = (e, id) => (e.levels && e.levels[id] && typeof e.levels[id].lines === 'number' ? e.levels[id].lines : '');
+  const rows = board.entries.map((e, i) => `| ${i + 1} | [@${e.user}](https://huggingface.co/${e.user}) | ${e.name.replace(/\|/g, '/')} | ${e.arch} | ${(e.battle && e.battle.elo) || ''} | ${T.LEVELS.map(l => lv(e, l.id)).join(' | ')} |`).join('\n');
   const bots = BOTS.slice().sort((a, b) => b.elo - a.elo).map(b => `${b.name} (${b.elo})`).join(', ');
   return `---
 license: mit
@@ -126,13 +122,13 @@ tags:
 
 People's agents in [Tetris GA](https://huggingface.co/spaces/GonzaloFuentes1/tetris-ga), ranked by battle Elo. One entry per account, top ${KEEP} only. Updated ${board.updated.slice(0, 16).replace('T', ' ')} UTC.
 
-| # | User | Agent | Network | Battle Elo | Overall rating |
-|---|---|---|---|---|---|
-${rows || '| | No submissions yet | | | | |'}
+| # | User | Agent | Network | Battle Elo | Classic | S/Z storm | Rising garbage | Chaos |
+|---|---|---|---|---|---|---|---|---|
+${rows || '| | No submissions yet | | | | | | | |'}
 
 Bots on the same Elo scale: ${bots}.
 
-**Overall rating** averages the four levels (Classic, S/Z storm, Rising garbage, Chaos); 100 on a level is the best bot's average score there.
+**Level columns** are lines cleared per game, averaged over 10 secret games of up to 2,000 pieces on that level. Surviving longer and clearing more both raise it. **Battle Elo** comes from head-to-head games against the bots and the people above.
 
 ## How to submit
 
@@ -163,7 +159,17 @@ async function reply(num, text) {
   if (SEEDS.length < 3) throw new Error('EVAL_SEEDS needs at least 3 seeds');
   const subs = await openSubmissions();
   console.log(`open submissions: ${subs.length}`);
-  if (!subs.length) return;
+  const board = await loadBoard();
+  // A new level benchmark re-measures everyone already on the board. Elo stays.
+  let changed = false;
+  if (board.benchmark !== BENCH) {
+    board.entries.forEach(e => {
+      try { e.levels = evaluate({ weights: e.weights, ev: T.makeEvaluator(e.spec) }); delete e.overall; } catch (err) { console.error('re-measure', e.user, err.message); }
+    });
+    board.benchmark = BENCH; changed = true;
+    console.log(`re-measured ${board.entries.length} entries on ${BENCH}`);
+  }
+  if (!subs.length) { if (changed) await saveBoard(board); return; }
 
   // One evaluation per user per run: the newest. Older ones are closed.
   const byUser = new Map();
@@ -174,9 +180,6 @@ async function reply(num, text) {
     else reply(d.num, `A newer submission from @${user} (#${byUser.get(user).num}) replaces this one.`).catch(e => console.error(e.message));
   });
 
-  const best = reference();
-  console.log('reference', JSON.stringify(best));
-  const board = await loadBoard();
   const results = [];
   for (const [user, d] of byUser) {
     try {
@@ -184,11 +187,8 @@ async function reply(num, text) {
       const first = (full.events || []).find(e => e.type === 'comment');
       const agent = validate(parseAgent(first && first.data && first.data.latest && first.data.latest.raw), String(d.title).slice(TAG.length).trim());
       const levels = evaluate(agent);
-      let sum = 0;
-      T.LEVELS.forEach(l => { levels[l.id].rating = +(levels[l.id].score / best[l.id] * 100).toFixed(1); sum += levels[l.id].rating; });
-      const overall = +(sum / T.LEVELS.length).toFixed(1);
       const elo = eloFor(agent, board, user);
-      const entry = { user, avatar: (d.author && d.author.avatarUrl) || null, name: agent.name, arch: agent.arch, levels, overall,
+      const entry = { user, avatar: (d.author && d.author.avatarUrl) || null, name: agent.name, arch: agent.arch, levels,
         battle: { elo }, spec: agent.spec, weights: agent.weights, submitted: d.createdAt, discussion: d.num };
       const prev = board.entries.find(e => e.user === user);
       let kept = !prev || elo > ((prev.battle && prev.battle.elo) || 0);
@@ -198,11 +198,11 @@ async function reply(num, text) {
         const out = board.entries.splice(KEEP);
         if (out.includes(entry)) kept = false;
       }
-      const lines = T.LEVELS.map(l => `| ${l.name} | ${levels[l.id].score.toLocaleString('en')} | ${levels[l.id].lines} | ${levels[l.id].rating} |`).join('\n');
+      const lines = T.LEVELS.map(l => `| ${l.name} | ${levels[l.id].lines} | ${levels[l.id].pieces} |`).join('\n');
       const why = kept ? 'It is now your entry on the leaderboard.'
         : prev && prev.battle && prev.battle.elo >= elo ? `Your entry on the leaderboard has a higher Elo (${prev.battle.elo}), so it stays.`
         : `The leaderboard keeps the top ${KEEP} by battle Elo, and this one did not make it yet.`;
-      results.push({ num: d.num, text: `**${agent.name}** by @${user} · ${agent.arch}\n\n| Level | Avg score | Avg lines | Rating |\n|---|---|---|---|\n${lines}\n\nBattle Elo: **${elo}**. Overall rating: **${overall}**. ` + why });
+      results.push({ num: d.num, text: `**${agent.name}** by @${user} · ${agent.arch}\n\n| Level | Lines per game | Pieces per game |\n|---|---|---|\n${lines}\n\nAverages over 10 secret games of up to ${LEVEL_CAP.toLocaleString('en')} pieces per level. Battle Elo: **${elo}**. ` + why });
     } catch (e) {
       results.push({ num: d.num, text: `Could not evaluate this submission: ${e.message}` });
     }
