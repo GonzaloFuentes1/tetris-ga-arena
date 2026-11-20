@@ -1,0 +1,28 @@
+name: Evaluate submissions
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: evaluate
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  evaluate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Evaluate open submissions
+        run: node evaluate.js
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          EVAL_SEEDS: ${{ secrets.EVAL_SEEDS }}
