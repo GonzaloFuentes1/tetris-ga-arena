@@ -292,18 +292,61 @@
     var a = pick(-1);
     return [a, pick(a)];
   }
+  // Options (defaults reproduce the original):
+  //   selection: 'roulette' (proportional to fitness), 'tournament' (best of 3) or 'rank'
+  //   crossover: 'uniform', 'one_point', 'two_point', 'blend' or 'none'
+  //   crossoverRate: chance a child mixes two parents; otherwise it copies one
+  var SELECTIONS = ['roulette', 'tournament', 'rank'];
+  var CROSSOVERS = ['uniform', 'one_point', 'two_point', 'blend', 'none'];
+  function tournament(rand, fitness, exclude) {
+    var best = -1;
+    for (var k = 0; k < 3; k++) {
+      var c = Math.floor(rand() * fitness.length);
+      if (c === exclude) c = (c + 1) % fitness.length;
+      if (best < 0 || fitness[c] > fitness[best]) best = c;
+    }
+    return best;
+  }
+  function cross(a, b, kind, rand) {
+    var len = a.length, child = new Array(len), j;
+    if (kind === 'one_point' || kind === 'two_point') {
+      var p1 = Math.floor(rand() * len), p2 = kind === 'two_point' ? Math.floor(rand() * len) : len;
+      if (p2 < p1) { var t = p1; p1 = p2; p2 = t; }
+      for (j = 0; j < len; j++) child[j] = j >= p1 && j < p2 ? b[j] : a[j];
+    } else if (kind === 'blend') {
+      for (j = 0; j < len; j++) { var al = rand(); child[j] = al * a[j] + (1 - al) * b[j]; }
+    } else if (kind === 'none') {
+      for (j = 0; j < len; j++) child[j] = a[j];
+    } else {
+      for (j = 0; j < len; j++) child[j] = rand() < 0.5 ? a[j] : b[j];
+    }
+    return child;
+  }
   function nextGeneration(pop, fitness, opts, rand) {
-    var n = pop.length;
+    var n = pop.length, sel = opts.selection || 'roulette', kind = opts.crossover || 'uniform';
+    var rate = opts.crossoverRate === undefined ? 1 : opts.crossoverRate;
     var order = pop.map(function (_, i) { return i; })
       .sort(function (a, b) { return fitness[b] - fitness[a]; });
-    var total = fitness.reduce(function (s, f) { return s + Math.max(0, f); }, 0);
-    var probs = fitness.map(function (f) { return total > 0 ? Math.max(0, f) / total + 1e-14 : 1 / n; });
+    var probs;
+    if (sel === 'rank') {
+      // Linear ranking: the best gets weight n, the worst 1.
+      var rankW = new Array(n);
+      order.forEach(function (idx, r) { rankW[idx] = n - r; });
+      var rs = n * (n + 1) / 2;
+      probs = rankW.map(function (x) { return x / rs; });
+    } else {
+      var total = fitness.reduce(function (s, f) { return s + Math.max(0, f); }, 0);
+      probs = fitness.map(function (f) { return total > 0 ? Math.max(0, f) / total + 1e-14 : 1 / n; });
+    }
     var nElite = Math.max(1, Math.round(n * opts.elitism));
     var out = [], i, j;
     for (i = 0; i < nElite && i < n; i++) out.push(pop[order[i]].slice());
     while (out.length < n) {
-      var ab = pickTwo(rand, probs), child = [], len = pop[0].length;
-      for (j = 0; j < len; j++) child.push(rand() < 0.5 ? pop[ab[0]][j] : pop[ab[1]][j]);
+      var ab;
+      if (sel === 'tournament') { var x = tournament(rand, fitness, -1); ab = [x, tournament(rand, fitness, x)]; }
+      else ab = pickTwo(rand, probs);
+      var mix = rate >= 1 || rand() < rate;
+      var child = mix ? cross(pop[ab[0]], pop[ab[1]], kind, rand) : pop[ab[0]].slice(), len = child.length;
       for (j = 0; j < len; j++) {
         if (rand() < opts.mutationProb) child[j] += gauss(rand) * opts.mutationPower;
       }
@@ -428,6 +471,6 @@
     defaultSpec: defaultSpec, makeEvaluator: makeEvaluator,
     W: W, H: H, LEVELS: LEVELS, SHAPES: SHAPES, NAMES: NAMES, ROTATIONS: ROTATIONS, FEATURES: FEATURES,
     rng: rng, features: features, placements: placements, Game: Game, play: play, battle: battle, SEND: SEND,
-    randomWeights: randomWeights, nextGeneration: nextGeneration
+    randomWeights: randomWeights, nextGeneration: nextGeneration, SELECTIONS: SELECTIONS, CROSSOVERS: CROSSOVERS
   };
 });
