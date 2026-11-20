@@ -12,11 +12,11 @@ const REPO = process.env.LB_REPO || 'GonzaloFuentes1/tetris-ga-leaderboard';
 const TOKEN = process.env.HF_TOKEN;
 const SEEDS = (process.env.EVAL_SEEDS || '').split(',').map(Number).filter(Number.isFinite).slice(0, 8);
 const CAP = 500;   // pieces per side in a battle
-// Level benchmark: 10 secret games per level, up to 2,000 pieces each,
+// Level benchmark: 10 secret games per level, up to 10,000 pieces each,
 // measured in lines cleared per game. The games come from the secret seeds.
-const LEVEL_CAP = 2000;
+const LEVEL_CAP = 10000;
 const LEVEL_SEEDS = (() => { const r = T.rng((SEEDS[0] || 1) ^ 0x5eed); return Array.from({ length: 10 }, () => Math.floor(r() * 1e9)); })();
-const BENCH = 'lines-10x2000+elo-12';
+const BENCH = 'lines-10x10000+elo-12';
 // Battle: 12 secret games against each bot give a steadier starting Elo.
 const BATTLE_SEEDS = (() => { const r = T.rng((SEEDS[1] || 2) ^ 0xba77); return Array.from({ length: 12 }, () => Math.floor(r() * 1e9)); })();
 const TAG = '[submission]';
@@ -177,7 +177,7 @@ Bots on the same Elo scale: ${bots}. Elo comes from head-to-head games against t
 
 ## Levels (top 10)
 
-Lines cleared per game, averaged over 10 secret games of up to 2,000 pieces on that level. Surviving longer and clearing more both raise it. The full lists are in the Space.
+Lines cleared per game, averaged over 10 secret games of up to 10,000 pieces on that level. Surviving longer and clearing more both raise it. The full lists are in the Space.
 
 ${levelTables}
 
