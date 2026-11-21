@@ -247,11 +247,11 @@
     return { score: g.score, lines: g.lines, pieces: g.pieces, over: g.over };
   }
 
-  // Battle: both agents get the same pieces; clearing 2, 3 or 4 lines at once
-  // sends 1, 2 or 4 garbage rows to the other board. The last one standing
-  // wins; if both reach maxPieces, the higher score wins.
+  // Battle: both agents get the same pieces; clearing 3 lines at once sends 1
+  // garbage row to the other board and a tetris (4 lines) sends 2. The last
+  // one standing wins; if both reach maxPieces, the higher score wins.
   // a and b are { weights, ev }. Returns 1 if a wins, 0 if b wins, 0.5 on a draw.
-  var SEND = [0, 0, 1, 2, 4];
+  var SEND = [0, 0, 0, 1, 2];
   function battle(a, b, seed, levelId, maxPieces) {
     var ga = new Game(seed, levelId), gb = new Game(seed, levelId);
     while (true) {
@@ -338,7 +338,7 @@
       var total = fitness.reduce(function (s, f) { return s + Math.max(0, f); }, 0);
       probs = fitness.map(function (f) { return total > 0 ? Math.max(0, f) / total + 1e-14 : 1 / n; });
     }
-    var nElite = Math.max(1, Math.round(n * opts.elitism));
+    var nElite = Math.min(n, Math.round(n * (opts.elitism || 0)));
     var out = [], i, j;
     for (i = 0; i < nElite && i < n; i++) out.push(pop[order[i]].slice());
     while (out.length < n) {
@@ -381,19 +381,43 @@
   // GA evolves every weight and bias. Inputs are divided by a typical scale
   // so tanh and sigmoid do not saturate.
   var MAX_LAYERS = 3, MAX_UNITS = 16;
+  // exp and tanh built only from + - * /, which give the same bits in every
+  // JavaScript engine. Math.exp and Math.tanh may differ in the last digit
+  // between browsers and Node, and over a long game that changes moves.
+  var LN2_HI = 0.6931471803691238, LN2_LO = 1.9082149292705877e-10;
+  function dexp(x) {
+    if (x !== x) return x;
+    if (x > 700) x = 700; else if (x < -700) return 0;
+    var n = Math.round(x / 0.6931471805599453), r = (x - n * LN2_HI) - n * LN2_LO;
+    // Taylor series on |r| <= 0.35, 14 terms.
+    var p = 1 / 87178291200;
+    for (var k = 13; k >= 1; k--) p = p * r + 1 / FACT[k];
+    p = p * r + 1;
+    var s = 1, b = n >= 0 ? 2 : 0.5;
+    for (var i = Math.abs(n); i > 0; i--) s *= b;
+    return p * s;
+  }
+  var FACT = [1];
+  for (var fi = 1; fi <= 14; fi++) FACT[fi] = FACT[fi - 1] * fi;
+  function dtanh(x) {
+    if (x !== x) return x;
+    if (x > 20) return 1; if (x < -20) return -1;
+    var t = dexp(-2 * Math.abs(x)), y = (1 - t) / (1 + t);
+    return x < 0 ? -y : y;
+  }
   var ACTS = {
     relu: function (x) { return x > 0 ? x : 0; },
     leaky_relu: function (x) { return x > 0 ? x : 0.05 * x; },
-    tanh: Math.tanh,
-    sigmoid: function (x) { return 1 / (1 + Math.exp(-x)); },
-    elu: function (x) { return x > 0 ? x : Math.exp(x) - 1; }
+    tanh: dtanh,
+    sigmoid: function (x) { return 1 / (1 + dexp(-x)); },
+    elu: function (x) { return x > 0 ? x : dexp(x) - 1; }
   };
   var SCALES = [200, 40, 60, 10, 20, 10, 80, 80, 40, 20, 20, 1, 4];
   function checkLayers(layers) {
     if (layers.length > MAX_LAYERS) throw new Error('At most ' + MAX_LAYERS + ' hidden layers.');
     layers.forEach(function (l) {
       if (!(l.units >= 1 && l.units <= MAX_UNITS && l.units === Math.floor(l.units))) throw new Error('Each hidden layer needs 1 to ' + MAX_UNITS + ' units.');
-      if (!ACTS[l.act]) throw new Error('Unknown activation: ' + l.act);
+      if (!Object.prototype.hasOwnProperty.call(ACTS, l.act)) throw new Error('Unknown activation: ' + l.act);
     });
   }
   function paramCount(inputs, layers) {
@@ -470,7 +494,7 @@
     ACTIVATIONS: Object.keys(ACTS), paramCount: paramCount, compileRule: compileRule,
     defaultSpec: defaultSpec, makeEvaluator: makeEvaluator,
     W: W, H: H, LEVELS: LEVELS, SHAPES: SHAPES, NAMES: NAMES, ROTATIONS: ROTATIONS, FEATURES: FEATURES,
-    rng: rng, features: features, placements: placements, Game: Game, play: play, battle: battle, SEND: SEND,
+    rng: rng, dexp: dexp, dtanh: dtanh, features: features, placements: placements, Game: Game, play: play, battle: battle, SEND: SEND,
     randomWeights: randomWeights, nextGeneration: nextGeneration, SELECTIONS: SELECTIONS, CROSSOVERS: CROSSOVERS
   };
 });

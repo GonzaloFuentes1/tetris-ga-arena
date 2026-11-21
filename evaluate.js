@@ -11,12 +11,12 @@ const T = require('./tetris.js');
 const REPO = process.env.LB_REPO || 'GonzaloFuentes1/tetris-ga-leaderboard';
 const TOKEN = process.env.HF_TOKEN;
 const SEEDS = (process.env.EVAL_SEEDS || '').split(',').map(Number).filter(Number.isFinite).slice(0, 8);
-const CAP = 500;   // pieces per side in a battle
+const CAP = 20000; // pieces per side in a battle
 // Level benchmark: 10 secret games per level, up to 10,000 pieces each,
 // measured in lines cleared per game. The games come from the secret seeds.
 const LEVEL_CAP = 10000;
 const LEVEL_SEEDS = (() => { const r = T.rng((SEEDS[0] || 1) ^ 0x5eed); return Array.from({ length: 10 }, () => Math.floor(r() * 1e9)); })();
-const BENCH = 'lines-10x10000+elo-12';
+const BENCH = 'lines-10x10000+battle-send012-20k';
 // Battle: 12 secret games against each bot give a steadier starting Elo.
 const BATTLE_SEEDS = (() => { const r = T.rng((SEEDS[1] || 2) ^ 0xba77); return Array.from({ length: 12 }, () => Math.floor(r() * 1e9)); })();
 const TAG = '[submission]';
@@ -42,11 +42,13 @@ async function hf(path, opts = {}) {
 
 async function openSubmissions() {
   const out = [];
+  let seen = 0;
   for (let p = 0; p < 20; p++) {
     const page = await hf(`/discussions?status=open&type=discussion&p=${p}`);
     const list = page.discussions || [];
+    seen += list.length;
     list.forEach(d => { if (!d.isPullRequest && String(d.title).startsWith(TAG)) out.push(d); });
-    if (list.length === 0 || out.length + list.length >= (page.count || 0)) break;
+    if (list.length === 0 || seen >= (page.count || 0)) break;
   }
   return out;
 }
@@ -70,7 +72,8 @@ function validate(body, fallbackName) {
   if (!Array.isArray(w) || w.length !== ev.size || !w.every(x => typeof x === 'number' && Number.isFinite(x) && Math.abs(x) < 1e6)) {
     throw new Error('The weights do not match the network.');
   }
-  const name = String(body.name || fallbackName || 'My agent').replace(/[\u0000-\u001f<>]/g, '').trim().slice(0, 24) || 'My agent';
+  // Names keep letters, digits, spaces and - . ' only: no markdown, links, images or @mentions.
+  const name = String(body.name || fallbackName || 'My agent').replace(/[^\p{L}\p{N} .'-]/gu, '').replace(/\s+/g, ' ').trim().slice(0, 24) || 'My agent';
   const arch = ev.layers.length ? ev.inputs + ' → ' + ev.layers.map(l => l.units + ' ' + l.act).join(' → ') + ' → 1' : ev.inputs + ' → 1';
   return { spec: clean, weights: w, ev, name, arch };
 }
@@ -140,6 +143,9 @@ function place(board, agent, user, d) {
 
 async function loadBoard() {
   const r = await fetch(`https://huggingface.co/datasets/${REPO}/resolve/main/leaderboard.json`, { headers: { Authorization: 'Bearer ' + TOKEN } });
+  // Only a missing file means an empty board. Any other failure stops the run,
+  // so a temporary error can never overwrite the leaderboard with nothing.
+  if (!r.ok && r.status !== 404) throw new Error('could not read leaderboard.json: ' + r.status);
   const b = r.ok ? await r.json() : { entries: [] };
   if (!Array.isArray(b.entries)) b.entries = [];
   b.entries.forEach(e => { if (!Array.isArray(e.boards)) e.boards = BOARDS.slice(); });
@@ -211,34 +217,45 @@ async function reply(num, text) {
   const subs = await openSubmissions();
   console.log(`open submissions: ${subs.length}`);
   const board = await loadBoard();
-  // A new benchmark re-measures everyone already on the board: levels, and
-  // battle Elo against the bots (games between people start over).
+  // The job has 15 minutes; no new work starts after 10, and what is done is saved.
+  const start = Date.now(), BUDGET = 10 * 60 * 1000, timeLeft = () => Date.now() - start < BUDGET;
+  // A new benchmark re-measures everyone already on the board (levels, and battle
+  // Elo against the bots; games between people start over), as many per run as fit.
   let changed = false;
   if (board.benchmark !== BENCH) {
-    board.entries.forEach(e => {
+    for (const e of board.entries) {
+      if (e.bench === BENCH) continue;
+      if (!timeLeft()) break;
       try { const a = { weights: e.weights, ev: T.makeEvaluator(e.spec) }; e.levels = evaluate(a); e.battle = { elo: eloFor(a, { entries: [] }, e.user).elo }; delete e.overall; } catch (err) { console.error('re-measure', e.user, err.message); }
-    });
-    board.benchmark = BENCH; changed = true;
-    console.log(`re-measured ${board.entries.length} entries on ${BENCH}`);
+      e.bench = BENCH; changed = true;
+    }
+    const left = board.entries.filter(e => e.bench !== BENCH).length;
+    if (!left) board.benchmark = BENCH;
+    console.log(`re-measured on ${BENCH}; ${left} left for the next run`);
+    if (left) { await saveBoard(board); return; }
   }
   if (!subs.length) { if (changed) await saveBoard(board); return; }
 
-  // One evaluation per user per run: the newest. Older ones are closed.
-  const byUser = new Map();
+  // One evaluation per user per run: the newest. Older ones close only once the
+  // newest has been evaluated, so an invalid new one never costs a valid old one.
+  const byUser = new Map(), older = new Map();
   subs.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)).forEach(d => {
     const user = d.author && d.author.name;
     if (!user) return;
-    if (!byUser.has(user)) byUser.set(user, d);
-    else reply(d.num, `A newer submission from @${user} (#${byUser.get(user).num}) replaces this one.`).catch(e => console.error(e.message));
+    if (!byUser.has(user)) { byUser.set(user, d); older.set(user, []); } else older.get(user).push(d);
   });
 
   const results = [];
   for (const [user, d] of byUser) {
+    if (!timeLeft()) break; // the rest wait for the next run
+    let full;
+    try { full = await hf(`/discussions/${d.num}`); }
+    catch (e) { console.error('API error, left open:', d.num, e.message); continue; }
     try {
-      const full = await hf(`/discussions/${d.num}`);
       const first = (full.events || []).find(e => e.type === 'comment');
       const agent = validate(parseAgent(first && first.data && first.data.latest && first.data.latest.raw), String(d.title).slice(TAG.length).trim());
       results.push({ num: d.num, text: place(board, agent, user, d) });
+      older.get(user).forEach(o => results.push({ num: o.num, text: `A newer submission (#${d.num}) replaces this one.` }));
     } catch (e) {
       results.push({ num: d.num, text: `Could not evaluate this submission: ${e.message}` });
     }
